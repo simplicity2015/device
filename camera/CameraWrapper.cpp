@@ -42,7 +42,8 @@ static int camera_device_open(const hw_module_t *module, const char *name,
         hw_device_t **device);
 static int camera_get_number_of_cameras(void);
 static int camera_get_camera_info(int camera_id, struct camera_info *info);
-
+static int camera_send_command(struct camera_device *device, int32_t cmd,
+int32_t arg1, int32_t arg2);
 static struct hw_module_methods_t camera_module_methods = {
     .open = camera_device_open
 };
@@ -96,6 +97,17 @@ static int check_vendor_module()
         ALOGE("failed to open vendor camera module");
     return rv;
 }
+static bool needYUV420preview(android::CameraParameters &params) {
+int video_width, video_height;
+params.getPreviewSize(&video_width, &video_height);
+ALOGV("%s : PreviewSize is %x", __FUNCTION__, video_width*video_height);
+return video_width*video_height <= 720*720;
+}
+
+#define KEY_VIDEO_HFR_VALUES "video-hfr-values"
+
+const static char * iso_values[] = {"auto,ISO_HJR,ISO100,ISO200,ISO400,ISO800,ISO1600,auto"};
+
 
 static char *camera_fixup_getparams(int id, const char *settings)
 {
@@ -105,6 +117,30 @@ static char *camera_fixup_getparams(int id, const char *settings)
 #if !LOG_NDEBUG
     ALOGV("%s: original parameters:", __FUNCTION__);
     params.dump();
+#endif
+// fix params here
+params.set(android::CameraParameters::KEY_SUPPORTED_ISO_MODES, iso_values[id]);
+params.set(android::CameraParameters::KEY_EXPOSURE_COMPENSATION_STEP, "0.5");
+params.set(android::CameraParameters::KEY_MIN_EXPOSURE_COMPENSATION, "-4");
+params.set(android::CameraParameters::KEY_MAX_EXPOSURE_COMPENSATION, "4");
+
+/* If the vendor has HFR values but doesn't also expose that
+* this can be turned off, fixup the params to tell the Camera
+* that it really is okay to turn it off.
+*/
+const char *hfrValues = params.get(KEY_VIDEO_HFR_VALUES);
+if (hfrValues && *hfrValues && ! strstr(hfrValues, "off")) {
+char tmp[strlen(hfrValues) + 4 + 1];
+sprintf(tmp, "%s,off", hfrValues);
+params.set(KEY_VIDEO_HFR_VALUES, tmp);
+}
+
+/* Enforce video-snapshot-supported to true */
+params.set(android::CameraParameters::KEY_VIDEO_SNAPSHOT_SUPPORTED, "true");
+
+#if !LOG_NDEBUG
+ALOGV("%s: fixed parameters:", __FUNCTION__);
+params.dump();
 #endif
 
     /* Remove HDR mode in front camera */
@@ -166,6 +202,26 @@ static char *camera_fixup_setparams(int id, const char *settings)
         params.set(android::CameraParameters::KEY_QC_AE_BRACKET_HDR, "Off");
         params.set(android::CameraParameters::KEY_QC_CAPTURE_BURST_EXPOSURE, "0,0,0");
     }
+if (needYUV420preview(params)) {
+ALOGV("%s: switching preview format to yuv420p", __FUNCTION__);
+params.set("preview-format", "yuv420p");
+}
+
+// fix params here
+// No need to fix-up ISO_HJR, it is the same for userspace and the camera lib
+if (params.get("iso")) {
+const char *isoMode = params.get(android::CameraParameters::KEY_ISO_MODE);
+if (strcmp(isoMode, "ISO100") == 0)
+params.set(android::CameraParameters::KEY_ISO_MODE, "100");
+else if (strcmp(isoMode, "ISO200") == 0)
+params.set(android::CameraParameters::KEY_ISO_MODE, "200");
+else if (strcmp(isoMode, "ISO400") == 0)
+params.set(android::CameraParameters::KEY_ISO_MODE, "400");
+else if (strcmp(isoMode, "ISO800") == 0)
+params.set(android::CameraParameters::KEY_ISO_MODE, "800");
+else if (strcmp(isoMode, "ISO1600") == 0)
+params.set(android::CameraParameters::KEY_ISO_MODE, "1600");
+}
 
 #if !LOG_NDEBUG
     ALOGV("%s: fixed parameters:", __FUNCTION__);
